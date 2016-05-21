@@ -1,17 +1,16 @@
-net = require 'net'
-es = require 'event-stream'
-
 # Xiaomi Yi Camera control
 
+events = require 'events'
+net = require 'net'
 stream = require 'stream'
-crypto = require 'crypto'
 
 shallowCopy = (obj) ->
   rv = {}
   for key of obj
-    rv[key] = obj[key] 
+    rv[key] = obj[key]
   return rv
 
+Buffer.allocUnsafe ?= (size) -> new Buffer size
 
 class YiParser extends stream.Transform
 
@@ -26,7 +25,6 @@ class YiParser extends stream.Transform
       console.log 'failed to parse', chunk.toString(), error.message
     @push payload
     done()
-
 
 class YiFile extends stream.Readable
 
@@ -49,7 +47,6 @@ class YiFile extends stream.Readable
     if @offset >= @size
       @push null
       return
-
     chunkSize = Math.min @size - @offset, CHUNK_SIZE
     @control.getFileChunk @filename, @offset, chunkSize, (error, chunk) =>
       if error?
@@ -58,13 +55,7 @@ class YiFile extends stream.Readable
         @offset += chunkSize
         @push chunk
 
-
-
-
-
-
-
-class YiControl
+class YiControl extends events.EventEmitter
 
   defaults =
     cameraHost: '192.168.42.1'
@@ -120,35 +111,32 @@ class YiControl
 
     @activeCmd = cmd = @cmdQueue.shift()
     cmd.timer = setTimeout timeout, @options.cmdTimeout
-    
+
     data = shallowCopy cmd.data
     if @token? and data.msg_id isnt 257
       data.token = @token
 
     msg = JSON.stringify data
-    console.log 'send', msg
     @cmdSocket.write msg
 
   handleMsg: (data) ->
     if @activeCmd?.data.msg_id is data.msg_id
       cmd = @activeCmd
       @activeCmd = null
-      console.log 'got response!', data
       if data.rval isnt 0
         error = new Error "Unexpected rval: #{ data.rval }"
-
       clearTimeout cmd.timer
       cmd.callback error, data
     else if data.msg_id is 7
-      console.log 'event', data.type, data.param
       if data.type is 'get_file_complete'
         if @activeChunk?
           @activeChunk._md5 = data.param[1].md5sum
           do @finalizeChunk
         else
           console.log 'WARNING: Got get_file_complete event with no active chunk!'
+        @emit 'event', data
     else
-      console.log 'got unknown message', data
+      console.log 'WARNING: Got unknown message', data
     do @runQueue
 
   getFileChunk: (filename, offset, size, callback) ->
@@ -156,8 +144,10 @@ class YiControl
     @waitingChunks.push {filename, offset, size, callback}
     do @runTransfer
 
-  getFileInfo: (filename, callback) -> 
+  getFileInfo: (filename, callback) ->
     @sendCmd {msg_id: 1026, param: filename}, callback
+
+  listDirectory: (path, callback) ->
 
   createReadStream: (filename) ->
     stream = new YiFile filename, this
@@ -199,7 +189,7 @@ class YiControl
       chunk.buffer = data
       chunk._pos = data.length
     else
-      chunk.buffer ?= Buffer.alloc chunk.size
+      chunk.buffer ?= Buffer.allocUnsafe chunk.size
       chunk._pos += data.copy chunk.buffer, chunk._pos
 
     if chunk._pos >= chunk.size
@@ -207,128 +197,69 @@ class YiControl
       do @finalizeChunk
 
 
-
-
-  # sendCmd: (data) ->
-  #   msg = JSON.stringify data
-  #   @cmdSocket.write msg
-
-  # handleCmd: (cmd) ->
-  #   if cmd.rval? and cmd.rval isnt 0
-  #     console.log "got error", cmd
-  #     return
-
-  #   switch cmd.msg_id
-  #     when 257
-  #       # got token
-  #       @token = cmd.param
-  #       console.log 'token set', @token
-  #       @sendCmd {msg_id:1282, param:'-D -S', token: @token}
-  #     else
-  #       console.log 'unhandled command', cmd
-
-
-# command queue
-# push command
-# message handler
-
-
-
-# read request file, size, offset
-
 yt = new YiControl
+  cameraHost: '192.168.1.32'
 
-SP = require 'streamspeed'
+###
 
-s = new SP
+  Messages IDs
 
+  1  - ? error -9
+  2  - ? error -9
+  3  - get settings, optional param setting name
+  4  - single beep? start recording?
+  5  - error -9
+  6  - error -9
+  7  - error -23
+  8  - error -13
+  9  - rval 0
+  10 - rval 0
+  11 - hwinfo
+  12 - error -23
+  13 - battery level
+  14 - error -9
+  15 - error -9
+  16 - error -14
+  17 - error -23
+  18 - error -23
+  18
 
-ts1 = yt.createReadStream '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0001.jpg'
-
-s.add ts1
-s.on 'speed', (speed, avg) ->
-  console.log SP.toHuman(speed, 's'), SP.toHuman(avg, 's')
-
-#ts2 = yt.createReadStream '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0001.jpg'
-
-fs = require 'fs'
-
-ts1.pipe fs.createWriteStream('t1.jpg')
-
-
-
-
-
-
-#ts2.pipe fs.createWriteStream('t2.jpg')
-
-# ts.on 'data', (data) ->
-#   console.log 'stream got', data.length
-
-
-# yt.sendCmd {msg_id: 769}, (error, result) ->
-#   console.log error, result
-#   # yt.sendCmd {msg_id: 1282, param: '-D -S'}, (error, result) ->
-#   #   console.log error, result
-
-# {"msg_id":1285,"param":"%s","offset":%d,"fetch_size":%d}'
-# yt.sendCmd {msg_id: 1285, param: '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0001.jpg', offset: 0, fetch_size: 500}, (error, result) ->
-#   console.log error, result
-
-# yt.sendCmd {msg_id: 1285, param: '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0001.jpg', offset: 0, fetch_size: 500}, (error, result) ->
-#   console.log error, result
-
-# yt.sendCmd {msg_id: 1026, param: '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0001.jpg'}, (error, result) ->
-#   console.log error, result
-
-# yt.getFileChunk '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0001.jpg', 0, 5000, (error, result) ->
-#   console.log error, result
-
-#yt.getFileChunk '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0001.jpg', 2752758 - 4000, 5000, (error, result) ->
-#  console.log '2', error, result
+  1536 disconnect wifi clients?
 
 
-  # yt.sendCmd {msg_id: 1282, param: '-D -S'}, (error, result) ->
-  #   console.log error, result
+  Error codes
+
+  0  ok
+  -9 invalid arguments?
+  -23 message id does not exist?
+  -14 no idea
+  -13 no idea
+
+###
+
+###
+{ rval: 0, msg_id: 11,
+  brand: 'Ambarella',
+  model: 'Default',
+  api_ver: '2.8.00',
+  fw_ver: 'Sun Sep  6 14:42:43 HKT 2015',
+  app_type: 'sport',
+  logo: '/tmp/fuse_z/app_logo.jpg',
+  chip: 'a7l',
+  http: 'disable' }
+###
 
 
-# yt.sendCmd {msg_id: 1283, param: '/etc'}, (error, result) ->
-#   console.log error, result
-#   yt.sendCmd {msg_id: 1282, param: '-D -S'}, (error, result) ->
-#     console.log error, result
 
-# s1.pipe parser
+# async = require 'async'
 
-# parser.on 'data', ->
-#   console.log 'esdata', arguments
+# testCommand = (id, callback) ->
+#   yt.sendCmd {msg_id: id}, (error, result) ->
+#     console.log id, result
+#     callback null, "#{ id } - #{ JSON.stringify result }"
 
-# s1.on 'data', (data) ->
-#   console.log "got '#{ data.toString() }'"
+# async.mapSeries [1500 ... 3000], testCommand, (error, result) ->
+#   console.log result.join '\n'
 
-# #   unless opa
-# #     opa = true
-# #     setTimeout ->
-# #       s1.write '{"msg_id":3, "token":8}\n'
-# #     , 1000
-# #     
-
-
-# API_PORT=7878
-# TRANSFER_PORT=8787
-# CAMERA_IP='192.168.42.1'
-
-
-# console.log net.Socket
-
-# s1 = new net.Socket
-
-# s1.connect
-#   port: API_PORT
-#   host: CAMERA_IP
-
-
-# s1.on 'connect', ->
-#   console.log 'connected?', arguments
-#   s1.write '{"msg_id":257,"token":0}\n'
-
-# opa = false
+yt.sendCmd {msg_id: 13}, (error, result) ->
+  console.log error, result
