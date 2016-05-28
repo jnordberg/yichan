@@ -1,5 +1,6 @@
 # Xiaomi Yi Camera control
 
+async = require 'async'
 events = require 'events'
 net = require 'net'
 stream = require 'stream'
@@ -12,23 +13,58 @@ shallowCopy = (obj) ->
 
 Buffer.allocUnsafe ?= (size) -> new Buffer size
 
+errorMessages =
+  '0': 'Ok'
+  '-3': 'Other device connected' # seems to happen when the iOS app is connected to the camera
+  '-4': 'Unauthorized' # token invalid or not provided
+  '-9': 'Invalid arguments'
+  '-13': 'Invalid setting value'
+  '-14': 'Setting already at requested value'
+  '-15': 'Setting not writable'
+  '-23': 'Invalid message id'
+  '-26': 'File not found'
+
+resolveErrorMessage = (code) -> errorMessages[String(code)] ? "Unknown code #{ code }"
+
+
 class YiParser extends stream.Transform
 
   constructor: (options={}) ->
     options.objectMode = true
+    @buffer = []
     super options
 
   _transform: (chunk, encoding, done) ->
-    try
-      payload = JSON.parse chunk
-    catch error
-      console.log 'failed to parse', chunk.toString(), error.message
-    @push payload
+    # the camera sends JSON encoded messages without any delimiters...
+    messages = []
+    @buffer.push chunk
+    data = Buffer.concat @buffer
+    @buffer = []
+
+    # parse any full messages found
+    while (idx = data.indexOf '}{') isnt -1
+      try
+        messages.push JSON.parse data.slice 0, idx + 1
+      catch error
+        console.log "WARNING: Got invalid JSON (#{ error.message })."
+      data = data.slice idx + 1
+
+    # try to parse potentially partial message
+    if data.slice(-1).toString() is '}'
+      try
+        messages.push JSON.parse data
+      catch error
+        @buffer.push data
+    else
+      @buffer.push data
+
+    # emit parsed messages on stream
+    @push message for message in messages
     done()
 
 class YiFile extends stream.Readable
 
-  CHUNK_SIZE = 2e5
+  CHUNK_SIZE = Math.pow 2, 20
 
   constructor: (@filename, @control) ->
     @offset = 0
@@ -62,6 +98,7 @@ class YiControl extends events.EventEmitter
     cmdPort: 7878
     transferPort: 8787
     cmdTimeout: 5000 # ms
+    autoconnect: true
 
   constructor: (@options={}) ->
     @options[key] ?= defaults[key] for key of defaults
@@ -70,36 +107,73 @@ class YiControl extends events.EventEmitter
     @cmdQueue = []
     @transferQueue = []
 
+    @connect()
+    @getToken()
+
+  connect: ->
     @cmdSocket = new net.Socket
     @cmdSocket.connect
       port: @options.cmdPort
-      host: @options.cameraHost
-
-    @transferSocket = new net.Socket
-    @transferSocket.on 'data', @handleTransfer.bind(this)
-    @transferSocket.connect
-      port: @options.transferPort
       host: @options.cameraHost
 
     @cmdParser = new YiParser
     @cmdParser.on 'data', @handleMsg.bind(this)
     @cmdSocket.pipe @cmdParser
 
+    @cmdSocket.setTimeout 2000
+    @cmdSocket.on 'timeout', => 
+      # TODO: some sort of heartbeat to keep the timeout from triggering
+      if @cmdSocket.readyState isnt 'open'
+        @cmdSocket.destroy()
+
     @cmdSocket.on 'connect', =>
+      @emit 'connected'
       do @runQueue
 
-    @sendCmd {msg_id: 257, token: 0}, (error, result) =>
-      if error?
-        console.log "Error creating token: #{ error.message }"
-      else
-         @token = result.param
+    @cmdSocket.on 'error', (error) ->
+      console.log "WARNING: Socket error, #{ error.message }"
 
-  sendCmd: (data, callback) ->
+    @cmdSocket.on 'close', =>
+      console.log "WARNING: Socket closed, trying to reconnect..."
+      if cmd = @activeCmd
+        @activeCmd = null
+        clearTimeout cmd.timer
+        cmd.callback new Error 'Socket closed'
+      setTimeout (=> do @connect), 1000
+
+  connectTransfer: ->
+    @transferSocket = new net.Socket
+    @transferSocket.on 'data', @handleTransfer.bind(this)
+    @transferSocket.on 'connect', =>
+      do @runTransfer
+    @transferSocket.on 'error', (error) ->
+      console.log "WARNING: Transfer socket error, #{ error.message }"
+    @transferSocket.on 'close', ->
+      console.log "WARNING: Transfer socket closed... reopening"
+      setTimeout (=> do @connectTransfer), 1000
+    @transferSocket.connect
+      port: @options.transferPort
+      host: @options.cameraHost
+
+  getToken: ->
+    @sendCmd {msg_id: 257, token: 0}, true, (error, result) =>
+      if error?
+        console.log "WARNING: Could not create token (#{ error.message })"
+      else
+        @token = result.param
+
+  sendCmd: (data, highPriority, callback) ->
     unless data.msg_id?
       callback new Error 'Missing msg_id'
       return
-    @cmdQueue.push {data, callback}
-    do @runQueue
+    if arguments.length is 2
+      callback = highPriority
+      highPriority = false
+    if highPriority
+      @cmdQueue.unshift {data, callback}
+    else
+      @cmdQueue.push {data, callback}
+    setImmediate => do @runQueue
 
   runQueue: ->
     if @cmdSocket.readyState isnt 'open' or @activeCmd? or @cmdQueue.length is 0
@@ -124,7 +198,10 @@ class YiControl extends events.EventEmitter
       cmd = @activeCmd
       @activeCmd = null
       if data.rval isnt 0
-        error = new Error "Unexpected rval: #{ data.rval }"
+        error = new Error resolveErrorMessage data.rval
+        error.code = data.rval
+        if error.code is -4
+          @getToken()
       clearTimeout cmd.timer
       cmd.callback error, data
     else if data.msg_id is 7
@@ -134,7 +211,9 @@ class YiControl extends events.EventEmitter
           do @finalizeChunk
         else
           console.log 'WARNING: Got get_file_complete event with no active chunk!'
+      else
         @emit 'event', data
+        @emit data.type, data.param
     else
       console.log 'WARNING: Got unknown message', data
     do @runQueue
@@ -145,21 +224,39 @@ class YiControl extends events.EventEmitter
     do @runTransfer
 
   getFileInfo: (filename, callback) ->
+    # NOTE: msg_id 1026 only actually works on media files, haven't found any command to get the size of other files, if there is any
     @sendCmd {msg_id: 1026, param: filename}, callback
 
-  listDirectory: (path, callback) ->
+  deleteFile: (filename, callback) ->
+    @sendCmd {msg_id: 1281, param: filename}, callback
+
+  listDirectory: (dirname, callback) ->
+    @sendCmd {msg_id: 1282, param: "#{ dirname } -D -S"}, callback
 
   createReadStream: (filename) ->
-    stream = new YiFile filename, this
+    return new YiFile filename, this
 
   runTransfer: ->
-    if @activeChunk? or @waitingChunks.length is 0
+    unless @transferSocket?
+      do @connectTransfer
       return
+
+    if @transferSocket.readyState isnt 'open' or @activeChunk? or @waitingChunks.length is 0
+      return
+
+    timeout = =>
+      chunk = @activeChunk
+      @activeChunk = null
+      @transferSocket.destroy()
+      @transferSocket = null
+      chunk.callback new Error 'Timed out'
 
     chunk = @activeChunk = @waitingChunks.shift()
     chunk._pos = 0
+    chunk._timer = setTimeout timeout, 30 * 1000
 
     @sendCmd {msg_id: 1285, param: chunk.filename, offset: chunk.offset, fetch_size: chunk.size}, (error, result) =>
+      clearTimeout chunk._timer
       if error?
         chunk.callback error
         @activeChunk = null
@@ -196,70 +293,57 @@ class YiControl extends events.EventEmitter
       chunk._readComplete = true
       do @finalizeChunk
 
+  getSettings: (callback) ->
+    @sendCmd {msg_id: 3}, (error, result) ->
+      unless error?
+        rv = []
+        for item in result.param
+          for key, value of item
+            rv[key] = value
+      callback error, rv
 
-yt = new YiControl
-  cameraHost: '192.168.1.32'
+  writeSettings: (settings, callback) ->
+    cmds = []
+    for key, value of settings
+      cmds.push
+        msg_id: 2
+        type: key
+        param: value
+    writeSetting = (cmd, callback) =>
+      @sendCmd cmd, (error) ->
+        # workaround for camera sending error code -14 if a setting is already at the requested value
+        if error?.code is -14
+          error = null
+        callback error
+    async.forEach cmds, writeSetting, callback
 
-###
+  getAvailableSettings: (callback) ->
+    settings = undefined
+    getSettings = (callback) => @getSettings (error, result) ->
+      unless error?
+        settings = result
+      callback error
 
-  Messages IDs
+    getOption = (option, callback) =>
+      @sendCmd {msg_id: 9, param: option}, callback
 
-  1  - ? error -9
-  2  - ? error -9
-  3  - get settings, optional param setting name
-  4  - single beep? start recording?
-  5  - error -9
-  6  - error -9
-  7  - error -23
-  8  - error -13
-  9  - rval 0
-  10 - rval 0
-  11 - hwinfo
-  12 - error -23
-  13 - battery level
-  14 - error -9
-  15 - error -9
-  16 - error -14
-  17 - error -23
-  18 - error -23
-  18
+    getOptions = (callback) ->
+      options = Object.keys settings
+      async.map options, getOption, callback
 
-  1536 disconnect wifi clients?
+    async.series [getSettings, getOptions], (error, result) ->
+      unless error?
+        rv = {}
+        for item in result[1]
+          key = item.param
+          delete item['msg_id']
+          delete item['rval']
+          delete item['param']
+          rv[key] = item
+      callback error, rv
 
-
-  Error codes
-
-  0  ok
-  -9 invalid arguments?
-  -23 message id does not exist?
-  -14 no idea
-  -13 no idea
-
-###
-
-###
-{ rval: 0, msg_id: 11,
-  brand: 'Ambarella',
-  model: 'Default',
-  api_ver: '2.8.00',
-  fw_ver: 'Sun Sep  6 14:42:43 HKT 2015',
-  app_type: 'sport',
-  logo: '/tmp/fuse_z/app_logo.jpg',
-  chip: 'a7l',
-  http: 'disable' }
-###
-
+  triggerShutter: (callback) ->
+    @sendCmd {msg_id: 769}, true, callback
 
 
-# async = require 'async'
-
-# testCommand = (id, callback) ->
-#   yt.sendCmd {msg_id: id}, (error, result) ->
-#     console.log id, result
-#     callback null, "#{ id } - #{ JSON.stringify result }"
-
-# async.mapSeries [1500 ... 3000], testCommand, (error, result) ->
-#   console.log result.join '\n'
-
-yt.sendCmd {msg_id: 13}, (error, result) ->
-  console.log error, result
+module.exports = YiControl
