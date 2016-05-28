@@ -1,15 +1,19 @@
 {
   "name": "yichan",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "description": "Xiaomi Yi Camera control library",
+  "main": "lib/index.js",
+  "author": "Johan Nordberg <code@johan-nordberg.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jnordberg/yichan.git"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "event-stream": "^3.3.2"
+    "async": "^2.0.0-rc.5"
+  },
+  "scripts": {
+    "prepublish": "coffee -c -b -o lib src"
   },
   "devDependencies": {
     "coffee-script": "^1.10.0"

@@ -111,6 +111,7 @@ class YiControl extends events.EventEmitter
     @getToken()
 
   connect: ->
+    @open = true
     @cmdSocket = new net.Socket
     @cmdSocket.connect
       port: @options.cmdPort
@@ -134,12 +135,20 @@ class YiControl extends events.EventEmitter
       console.log "WARNING: Socket error, #{ error.message }"
 
     @cmdSocket.on 'close', =>
-      console.log "WARNING: Socket closed, trying to reconnect..."
       if cmd = @activeCmd
         @activeCmd = null
         clearTimeout cmd.timer
         cmd.callback new Error 'Socket closed'
-      setTimeout (=> do @connect), 1000
+      if @open
+        console.log "WARNING: Socket closed, trying to reconnect..."
+        setTimeout (=> do @connect), 1000
+
+  close: ->
+    @open = false
+    @cmdSocket?.destroy()
+    @transferSocket?.destroy()
+    @cmdSocket = null
+    @transferSocket = null
 
   connectTransfer: ->
     @transferSocket = new net.Socket
@@ -148,9 +157,10 @@ class YiControl extends events.EventEmitter
       do @runTransfer
     @transferSocket.on 'error', (error) ->
       console.log "WARNING: Transfer socket error, #{ error.message }"
-    @transferSocket.on 'close', ->
-      console.log "WARNING: Transfer socket closed... reopening"
-      setTimeout (=> do @connectTransfer), 1000
+    @transferSocket.on 'close', =>
+      if @open
+        console.log "WARNING: Transfer socket closed... reopening"
+        setTimeout (=> do @connectTransfer), 1000
     @transferSocket.connect
       port: @options.transferPort
       host: @options.cameraHost
@@ -176,7 +186,7 @@ class YiControl extends events.EventEmitter
     setImmediate => do @runQueue
 
   runQueue: ->
-    if @cmdSocket.readyState isnt 'open' or @activeCmd? or @cmdQueue.length is 0
+    if @cmdSocket?.readyState isnt 'open' or @activeCmd? or @cmdQueue.length is 0
       return
 
     timeout = =>
