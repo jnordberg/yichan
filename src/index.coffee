@@ -64,31 +64,24 @@ class YiParser extends stream.Transform
 
 class YiFile extends stream.Readable
 
-  CHUNK_SIZE = Math.pow 2, 20
+  CHUNK_SIZE = 512000
 
   constructor: (@filename, @control) ->
     @offset = 0
-    @control.getFileInfo @filename, (error, result) =>
-      if error?
-        @emit 'error', error
-      else
-        @size = result.size
-        @read 0
-    super()
+    super
 
   _read: ->
-    unless @size?
-      @push()
-      return
-    if @offset >= @size
+    if @size? and @offset >= @size
       @push null
       return
-    chunkSize = Math.min @size - @offset, CHUNK_SIZE
-    @control.getFileChunk @filename, @offset, chunkSize, (error, chunk) =>
+    @control.getFileChunk @filename, @offset, CHUNK_SIZE, (error, chunk, totalSize) =>
       if error?
-        @emit 'error', error
+        console.log "WARNING: Error when reading chunk at offset #{ @offset } of #{ @filename }, #{ error.message }"
+        do @push
+        setTimeout (=> @read 0), 1000
       else
-        @offset += chunkSize
+        @size = totalSize
+        @offset += chunk.length
         @push chunk
 
 class YiControl extends events.EventEmitter
@@ -97,8 +90,8 @@ class YiControl extends events.EventEmitter
     cameraHost: '192.168.42.1'
     cmdPort: 7878
     transferPort: 8787
-    cmdTimeout: 5000 # ms
-    autoconnect: true
+    cmdTimeout: 5000
+    transferTimeout: 5000
 
   constructor: (@options={}) ->
     @options[key] ?= defaults[key] for key of defaults
@@ -108,7 +101,6 @@ class YiControl extends events.EventEmitter
     @transferQueue = []
 
     @connect()
-    @getToken()
 
   connect: ->
     @open = true
@@ -121,15 +113,15 @@ class YiControl extends events.EventEmitter
     @cmdParser.on 'data', @handleMsg.bind(this)
     @cmdSocket.pipe @cmdParser
 
-    @cmdSocket.setTimeout 2000
-    @cmdSocket.on 'timeout', => 
+    @cmdSocket.setTimeout @options.cmdTimeout
+    @cmdSocket.on 'timeout', =>
       # TODO: some sort of heartbeat to keep the timeout from triggering
-      if @cmdSocket.readyState isnt 'open'
+      if @cmdSocket.readyState isnt 'open' or @activeCmd?
         @cmdSocket.destroy()
 
     @cmdSocket.on 'connect', =>
       @emit 'connected'
-      do @runQueue
+      do @getToken
 
     @cmdSocket.on 'error', (error) ->
       console.log "WARNING: Socket error, #{ error.message }"
@@ -150,17 +142,20 @@ class YiControl extends events.EventEmitter
     @cmdSocket = null
     @transferSocket = null
 
-  connectTransfer: ->
+  setupTransfer: ->
     @transferSocket = new net.Socket
-    @transferSocket.on 'data', @handleTransfer.bind(this)
-    @transferSocket.on 'connect', =>
-      do @runTransfer
+    @transferSocket.on 'data', (@handleTransfer.bind this)
+    @transferSocket.on 'connect', (@processChunk.bind this)
     @transferSocket.on 'error', (error) ->
       console.log "WARNING: Transfer socket error, #{ error.message }"
     @transferSocket.on 'close', =>
-      if @open
-        console.log "WARNING: Transfer socket closed... reopening"
-        setTimeout (=> do @connectTransfer), 1000
+      @transferSocket = null
+      do @processChunk
+      if @activeChunk?
+        console.log "WARNING: Transfer socket unexpectedly closed"
+        chunk = @activeChunk
+        @activeChunk = null
+        chunk.callback new Error 'Socket unexpectedly closed'
     @transferSocket.connect
       port: @options.transferPort
       host: @options.cameraHost
@@ -179,22 +174,30 @@ class YiControl extends events.EventEmitter
     if arguments.length is 2
       callback = highPriority
       highPriority = false
+
+    cmd = {data, callback}
+
+    timeout = =>
+      if cmd is @activeCmd
+        @activeCmd = null
+      else
+        @cmdQueue.splice (@cmdQueue.indexOf cmd), 1
+      cmd.callback new Error 'Timed out'
+
+    cmd.timer = setTimeout timeout, @options.cmdTimeout
+
     if highPriority
-      @cmdQueue.unshift {data, callback}
+      @cmdQueue.unshift cmd
     else
-      @cmdQueue.push {data, callback}
+      @cmdQueue.push cmd
+
     setImmediate => do @runQueue
 
   runQueue: ->
     if @cmdSocket?.readyState isnt 'open' or @activeCmd? or @cmdQueue.length is 0
       return
 
-    timeout = =>
-      @activeCmd = null
-      cmd.callback new Error 'Timed out'
-
     @activeCmd = cmd = @cmdQueue.shift()
-    cmd.timer = setTimeout timeout, @options.cmdTimeout
 
     data = shallowCopy cmd.data
     if @token? and data.msg_id isnt 257
@@ -208,7 +211,7 @@ class YiControl extends events.EventEmitter
       cmd = @activeCmd
       @activeCmd = null
       if data.rval isnt 0
-        error = new Error resolveErrorMessage data.rval
+        error = new Error "#{ resolveErrorMessage data.rval } (msg_id: #{ data.msg_id })"
         error.code = data.rval
         if error.code is -4
           @getToken()
@@ -229,9 +232,9 @@ class YiControl extends events.EventEmitter
     do @runQueue
 
   getFileChunk: (filename, offset, size, callback) ->
-    @waitingChunks ?= []
-    @waitingChunks.push {filename, offset, size, callback}
-    do @runTransfer
+    @chunkQueue ?= []
+    @chunkQueue.push {filename, offset, size, callback}
+    do @processChunk
 
   getFileInfo: (filename, callback) ->
     # NOTE: msg_id 1026 only actually works on media files, haven't found any command to get the size of other files, if there is any
@@ -246,32 +249,36 @@ class YiControl extends events.EventEmitter
   createReadStream: (filename) ->
     return new YiFile filename, this
 
-  runTransfer: ->
+  transferTimeout: =>
+    chunk = @activeChunk
+    @activeChunk = null
+    @transferSocket.destroy()
+    @transferSocket = null
+    chunk.callback new Error 'Timed out'
+
+  processChunk: ->
+    if @activeChunk? or @chunkQueue.length is 0
+      return
+
     unless @transferSocket?
-      do @connectTransfer
+      do @setupTransfer
       return
 
-    if @transferSocket.readyState isnt 'open' or @activeChunk? or @waitingChunks.length is 0
-      return
+    @transferSocket.setTimeout @options.transferTimeout
+    @transferSocket.once 'timeout', @transferTimeout
 
-    timeout = =>
-      chunk = @activeChunk
-      @activeChunk = null
-      @transferSocket.destroy()
-      @transferSocket = null
-      chunk.callback new Error 'Timed out'
-
-    chunk = @activeChunk = @waitingChunks.shift()
+    chunk = @activeChunk = @chunkQueue.shift()
     chunk._pos = 0
-    chunk._timer = setTimeout timeout, 30 * 1000
 
     @sendCmd {msg_id: 1285, param: chunk.filename, offset: chunk.offset, fetch_size: chunk.size}, (error, result) =>
-      clearTimeout chunk._timer
       if error?
         chunk.callback error
         @activeChunk = null
+        @transferSocket?.setTimeout 0
+        @transferSocket?.removeListener 'timeout', @transferTimeout
       else
         chunk.size = result.rem_size
+        chunk._totalSize = result.size
 
   finalizeChunk: ->
     unless chunk = @activeChunk
@@ -283,9 +290,11 @@ class YiControl extends events.EventEmitter
       #   .createHash 'md5'
       #   .update chunk.buffer
       #   .digest 'hex'
-      chunk.callback null, chunk.buffer
       @activeChunk = null
-      do @runTransfer
+      @transferSocket.setTimeout 0
+      @transferSocket.removeListener 'timeout', @transferTimeout
+      chunk.callback null, chunk.buffer, chunk._totalSize
+      do @processChunk
 
   handleTransfer: (data) ->
     unless chunk = @activeChunk
