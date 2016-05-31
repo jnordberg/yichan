@@ -4,6 +4,7 @@ async = require 'async'
 events = require 'events'
 net = require 'net'
 stream = require 'stream'
+crypto = require 'crypto'
 
 shallowCopy = (obj) ->
   rv = {}
@@ -18,7 +19,7 @@ errorMessages =
   '-3': 'Other device connected' # seems to happen when the iOS app is connected to the camera
   '-4': 'Unauthorized' # token invalid or not provided
   '-9': 'Invalid arguments'
-  '-13': 'Invalid setting value'
+  '-13': 'Invalid value'
   '-14': 'Setting already at requested value'
   '-15': 'Setting not writable'
   '-23': 'Invalid message id'
@@ -62,12 +63,14 @@ class YiParser extends stream.Transform
     @push message for message in messages
     done()
 
-class YiFile extends stream.Readable
+class YiFileReadable extends stream.Readable
 
   CHUNK_SIZE = 512000
+  MAX_ERRORS = 5
 
   constructor: (@filename, @control) ->
     @offset = 0
+    @errors = 0
     super
 
   _read: ->
@@ -77,12 +80,31 @@ class YiFile extends stream.Readable
     @control.getFileChunk @filename, @offset, CHUNK_SIZE, (error, chunk, totalSize) =>
       if error?
         console.log "WARNING: Error when reading chunk at offset #{ @offset } of #{ @filename }, #{ error.message }"
-        do @push
-        setTimeout (=> @read 0), 1000
+        if ++@errors > MAX_ERRORS
+          @emit 'error', error
+        else
+          do @push
+          setTimeout (=> @read 0), 1000
       else
         @size = totalSize
         @offset += chunk.length
         @push chunk
+
+class YiFileWritable extends stream.Writable
+
+  constructor: (@filename, @control) ->
+    @offset = 0
+    super
+
+  _write: (chunk, encoding, callback) ->
+    @control.putFileChunk @filename, @offset, chunk, (error) =>
+      unless error?
+        @offset += chunk.length
+      else
+        if error.code is -13
+          error.message = "File '#{ @filename }' already exists."
+      callback error
+
 
 class YiControl extends events.EventEmitter
 
@@ -98,7 +120,7 @@ class YiControl extends events.EventEmitter
 
     @token = null
     @cmdQueue = []
-    @transferQueue = []
+    @chunkQueue = []
 
     @connect()
 
@@ -218,26 +240,32 @@ class YiControl extends events.EventEmitter
       clearTimeout cmd.timer
       cmd.callback error, data
     else if data.msg_id is 7
-      if data.type is 'get_file_complete'
-        if @activeChunk?
-          @activeChunk._md5 = data.param[1].md5sum
-          do @finalizeChunk
+      switch data.type
+        when 'get_file_complete', 'put_file_complete'
+          if @activeChunk?
+            @activeChunk._md5 = data.md5sum ? data.param[1].md5sum
+            do @finalizeChunk
+          else
+            console.log "WARNING: Got #{ data.type } event with no active chunk!"
+        when 'put_file_fail'
+          if @activeChunk?
+            @transferError 'Transfer failed.'
         else
-          console.log 'WARNING: Got get_file_complete event with no active chunk!'
-      else
-        @emit 'event', data
-        @emit data.type, data.param
+          @emit 'event', data
+          @emit data.type, data.param
     else
       console.log 'WARNING: Got unknown message', data
     do @runQueue
 
   getFileChunk: (filename, offset, size, callback) ->
-    @chunkQueue ?= []
-    @chunkQueue.push {filename, offset, size, callback}
+    @chunkQueue.push {filename, offset, size, callback, type: 'get'}
     do @processChunk
 
-  getFileInfo: (filename, callback) ->
-    # NOTE: msg_id 1026 only actually works on media files, haven't found any command to get the size of other files, if there is any
+  putFileChunk: (filename, offset, buffer, callback) ->
+    @chunkQueue.push {filename, offset, buffer, callback, type: 'put'}
+    do @processChunk
+
+  getMediaInfo: (filename, callback) ->
     @sendCmd {msg_id: 1026, param: filename}, callback
 
   deleteFile: (filename, callback) ->
@@ -246,15 +274,16 @@ class YiControl extends events.EventEmitter
   listDirectory: (dirname, callback) ->
     @sendCmd {msg_id: 1282, param: "#{ dirname } -D -S"}, callback
 
-  createReadStream: (filename) ->
-    return new YiFile filename, this
+  createReadStream: (filename) -> new YiFileReadable filename, this
 
-  transferTimeout: =>
+  createWriteStream: (filename) -> new YiFileWritable filename, this
+
+  transferError: (message='Timed out.') =>
     chunk = @activeChunk
     @activeChunk = null
     @transferSocket.destroy()
     @transferSocket = null
-    chunk.callback new Error 'Timed out'
+    chunk.callback new Error message
 
   processChunk: ->
     if @activeChunk? or @chunkQueue.length is 0
@@ -265,25 +294,44 @@ class YiControl extends events.EventEmitter
       return
 
     @transferSocket.setTimeout @options.transferTimeout
-    @transferSocket.once 'timeout', @transferTimeout
+    @transferSocket.once 'timeout', @transferError
 
     chunk = @activeChunk = @chunkQueue.shift()
     chunk._pos = 0
 
-    @sendCmd {msg_id: 1285, param: chunk.filename, offset: chunk.offset, fetch_size: chunk.size}, (error, result) =>
-      if error?
-        chunk.callback error
-        @activeChunk = null
-        @transferSocket?.setTimeout 0
-        @transferSocket?.removeListener 'timeout', @transferTimeout
-      else
-        chunk.size = result.rem_size
-        chunk._totalSize = result.size
+    handleError = (error) =>
+      chunk.callback error
+      @activeChunk = null
+      @transferSocket?.setTimeout 0
+      @transferSocket?.removeListener 'timeout', @transferError
+
+    switch chunk.type
+      when 'get'
+        @sendCmd {msg_id: 1285, param: chunk.filename, offset: chunk.offset, fetch_size: chunk.size}, (error, result) =>
+          if error?
+            handleError error
+            return
+          chunk.size = result.rem_size
+          chunk._totalSize = result.size
+      when 'put'
+        md5sum = crypto
+          .createHash 'md5'
+          .update chunk.buffer
+          .digest 'hex'
+        offset = chunk.offset
+        size = chunk.buffer.length + offset
+        @sendCmd {msg_id: 1286, param: chunk.filename, offset, size, md5sum}, (error, result) =>
+          if error?
+            handleError error
+            return
+          @transferSocket.write chunk.buffer, =>
+            chunk._complete = true
+            do @processChunk
 
   finalizeChunk: ->
     unless chunk = @activeChunk
       return
-    if chunk._readComplete and chunk._md5?
+    if chunk._md5? and chunk._complete
       # the checksum only matches what is sent if the whole file is asked for with fetch_size
       # i guess they have some bug with calculating it for partial requests
       # checksum = crypto
@@ -292,13 +340,17 @@ class YiControl extends events.EventEmitter
       #   .digest 'hex'
       @activeChunk = null
       @transferSocket.setTimeout 0
-      @transferSocket.removeListener 'timeout', @transferTimeout
+      @transferSocket.removeListener 'timeout', @transferError
       chunk.callback null, chunk.buffer, chunk._totalSize
       do @processChunk
 
   handleTransfer: (data) ->
     unless chunk = @activeChunk
       console.log 'WARNING: Got transfer data without active chunk!', data.length
+      return
+
+    if chunk.type is 'put'
+      console.log 'WARNING: Got transfer data when writing chunk!', data.length
       return
 
     if data.length is chunk.size
@@ -309,7 +361,7 @@ class YiControl extends events.EventEmitter
       chunk._pos += data.copy chunk.buffer, chunk._pos
 
     if chunk._pos >= chunk.size
-      chunk._readComplete = true
+      chunk._complete = true
       do @finalizeChunk
 
   getSettings: (callback) ->
