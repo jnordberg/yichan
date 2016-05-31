@@ -272,7 +272,16 @@ class YiControl extends events.EventEmitter
     @sendCmd {msg_id: 1281, param: filename}, callback
 
   listDirectory: (dirname, callback) ->
-    @sendCmd {msg_id: 1282, param: "#{ dirname } -D -S"}, callback
+    @sendCmd {msg_id: 1282, param: "#{ dirname } -S -D"}, (error, result) ->
+      unless error?
+        rv = []
+        for item in result.listing
+          for name, meta of item
+            parts = meta.split '|'
+            size = parseInt (parts[0].replace ' bytes', '')
+            date = new Date parts[1]
+            rv.push {name, size, date}
+      callback error, rv
 
   createReadStream: (filename) -> new YiFileReadable filename, this
 
