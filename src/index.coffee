@@ -272,6 +272,7 @@ class YiControl extends events.EventEmitter
     @sendCmd {msg_id: 1281, param: filename}, callback
 
   listDirectory: (dirname, callback) ->
+    dirname += '/' if dirname[-1..] isnt '/' # camera crashes when listing a directory w/o trailing slash
     @sendCmd {msg_id: 1282, param: "#{ dirname } -S -D"}, (error, result) ->
       unless error?
         rv = []
