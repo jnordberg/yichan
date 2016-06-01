@@ -16,6 +16,7 @@ Buffer.allocUnsafe ?= (size) -> new Buffer size
 
 errorMessages =
   '0': 'Ok'
+  '-1': 'File not found'
   '-3': 'Other device connected' # seems to happen when the iOS app is connected to the camera
   '-4': 'Unauthorized' # token invalid or not provided
   '-9': 'Invalid arguments'
@@ -79,6 +80,10 @@ class YiFileReadable extends stream.Readable
       return
     @control.getFileChunk @filename, @offset, CHUNK_SIZE, (error, chunk, totalSize) =>
       if error?
+        if error.code is -1
+          error.message = "File '#{ @filename }' not found."
+          @emit 'error', error
+          return
         console.log "WARNING: Error when reading chunk at offset #{ @offset } of #{ @filename }, #{ error.message }"
         if ++@errors > MAX_ERRORS
           @emit 'error', error
@@ -269,7 +274,11 @@ class YiControl extends events.EventEmitter
     @sendCmd {msg_id: 1026, param: filename}, callback
 
   deleteFile: (filename, callback) ->
-    @sendCmd {msg_id: 1281, param: filename}, callback
+    @sendCmd {msg_id: 1281, param: filename}, (error, result) ->
+      if error?
+        if error.code is -1
+          error.message = "File '#{ filename }' does not exist."
+      callback error, result
 
   listDirectory: (dirname, callback) ->
     dirname += '/' if dirname[-1..] isnt '/' # camera crashes when listing a directory w/o trailing slash
