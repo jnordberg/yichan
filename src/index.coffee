@@ -386,7 +386,7 @@ class YiControl extends events.EventEmitter
   getSettings: (callback) ->
     @sendCmd {msg_id: 3}, (error, result) ->
       unless error?
-        rv = []
+        rv = {}
         for item in result.param
           for key, value of item
             rv[key] = value
