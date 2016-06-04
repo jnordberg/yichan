@@ -435,5 +435,11 @@ class YiControl extends events.EventEmitter
   triggerShutter: (callback) ->
     @sendCmd {msg_id: 769}, true, callback
 
+  getStatus: (callback) ->
+    @sendCmd {msg_id: 1, type: 'app_status'}, (error, result) ->
+      unless error?
+        rv = result.param
+      callback error, rv
+
 
 module.exports = YiControl
