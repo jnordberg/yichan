@@ -188,7 +188,7 @@ class YiControl extends events.EventEmitter
       host: @options.cameraHost
 
   getToken: ->
-    @sendCmd {msg_id: 257, token: 0}, true, (error, result) =>
+    @sendCmd {msg_id: 257, token: 0, heartbeat: 1}, true, (error, result) =>
       if error?
         console.log "WARNING: Could not create token (#{ error.message })"
       else
