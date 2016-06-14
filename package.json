@@ -1,6 +1,6 @@
 {
   "name": "yichan",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Xiaomi Yi Camera control library",
   "main": "lib/index.js",
   "author": "Johan Nordberg <code@johan-nordberg.com>",
