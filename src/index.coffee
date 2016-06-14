@@ -204,14 +204,14 @@ class YiControl extends events.EventEmitter
 
     cmd = {data, callback}
 
-    timeout = =>
+    cmd.timeout = =>
       if cmd is @activeCmd
         @activeCmd = null
       else
         @cmdQueue.splice (@cmdQueue.indexOf cmd), 1
       cmd.callback new Error 'Timed out'
 
-    cmd.timer = setTimeout timeout, @options.cmdTimeout
+    cmd.timer = setTimeout cmd.timeout, @options.cmdTimeout
 
     if highPriority
       @cmdQueue.unshift cmd
@@ -243,8 +243,15 @@ class YiControl extends events.EventEmitter
         if error.code is -4
           @getToken()
       clearTimeout cmd.timer
-      cmd.callback error, data
+      if data.msg_id is 16777220 and data.rval is 0
+        # wait for the photo_taken event
+        cmd.timer = setTimeout cmd.timeout, @options.cmdTimeout
+        @activeCmd = cmd
+      else
+        cmd.callback error, data
     else if data.msg_id is 7
+      delete data['msg_id']
+      @emit 'event', data
       switch data.type
         when 'get_file_complete', 'put_file_complete'
           if @activeChunk?
@@ -255,8 +262,16 @@ class YiControl extends events.EventEmitter
         when 'put_file_fail'
           if @activeChunk?
             @transferError 'Transfer failed.'
+        when 'photo_taken'
+          filename = data.param
+          if @activeCmd? and @activeCmd.data.msg_id is 16777220
+            cmd = @activeCmd
+            @activeCmd = null
+            clearTimeout cmd.timer
+            cmd.callback null, filename
+          else
+            @emit 'photo_taken', filename
         else
-          @emit 'event', data
           @emit data.type, data.param
     else
       console.log 'WARNING: Got unknown message', data
@@ -434,6 +449,9 @@ class YiControl extends events.EventEmitter
 
   triggerShutter: (callback) ->
     @sendCmd {msg_id: 769}, true, callback
+
+  capturePhoto: (callback) ->
+    @sendCmd {msg_id: 16777220, param: 'precise quality;off'}, true, callback
 
   getStatus: (callback) ->
     @sendCmd {msg_id: 1, type: 'app_status'}, (error, result) ->
