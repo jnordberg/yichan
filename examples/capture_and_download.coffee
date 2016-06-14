@@ -17,20 +17,22 @@ tasks.push (callback) ->
 
 # trigger capture
 tasks.push (callback) ->
-  camera.triggerShutter callback
+  console.log 'Capturing photo...'
+  camera.capturePhoto callback
 
-# listen to photo_taken events and download photos to current directory
-camera.on 'photo_taken', (filename) ->
+# download photo to current directory
+tasks.push (filename, callback) ->
   console.log 'Photo taken! Downloading...'
   photo = camera.createReadStream filename
   localFile = fs.createWriteStream path.basename filename
   localFile.on 'close', ->
     console.log 'Photo saved! Removing from camera...'
     camera.deleteFile filename, (error) ->
-      throw error if error?
-      console.log 'Done!'
-      camera.close()
+      unless error?
+        console.log 'Done!'
+        camera.close()
+      callback error
   photo.pipe localFile
 
 # run tasks
-async.series tasks, (error) -> throw error if error?
+async.waterfall tasks, (error) -> throw error if error?
