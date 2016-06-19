@@ -356,7 +356,7 @@ class YiControl extends events.EventEmitter
             console.log "WARNING: Got #{ data.type } event with no active chunk!"
         when 'put_file_fail'
           if @activeChunk?
-            @transferError 'Transfer failed.'
+            @transferError 'Transfer failed.', 'EFAIL'
         when 'photo_taken'
           filename = data.param
           if @activeCmd? and @activeCmd.data.msg_id is 16777220
@@ -407,12 +407,14 @@ class YiControl extends events.EventEmitter
 
   createWriteStream: (filename) -> new YiFileWritable filename, this
 
-  transferError: (message='Timed out.') =>
+  transferError: (message='Timed out waiting for transfer socket.', code='ETIMEOUT') =>
     chunk = @activeChunk
     @activeChunk = null
     @transferSocket.destroy()
     @transferSocket = null
-    chunk.callback new Error message
+    error = new Error message
+    error.code = code
+    chunk.callback error
 
   processChunk: ->
     if @activeChunk? or @chunkQueue.length is 0
