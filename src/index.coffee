@@ -6,6 +6,8 @@ net = require 'net'
 stream = require 'stream'
 crypto = require 'crypto'
 
+ambsh = require './ambsh'
+
 AMBA_GET_SETTING                =  1 # type = setting name
                                      # app_status
 AMBA_SET_SETTINGS               =  2 # type = name, param = value
@@ -568,6 +570,8 @@ class YiControl extends events.EventEmitter
       unless error?
         rv = result.param
       callback error, rv
+
+  execCommand: (command, callback) -> ambsh this, command, callback
 
 
 module.exports = YiControl
