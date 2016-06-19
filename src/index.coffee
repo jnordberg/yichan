@@ -187,8 +187,11 @@ class YiFileReadable extends stream.Readable
           setTimeout (=> @read 0), 1000
       else
         @size = totalSize
-        @offset += chunk.length
-        @push chunk
+        if chunk?
+          @offset += chunk.length
+          @push chunk
+        else
+          @push null
 
 class YiFileWritable extends stream.Writable
 
@@ -442,8 +445,18 @@ class YiControl extends events.EventEmitter
           if error?
             handleError error
             return
-          chunk.size = result.rem_size
           chunk._totalSize = result.size
+          if result.rem_size isnt chunk.size
+            chunk.size = result.rem_size
+            # sometimes the camera starts writing before responding to the get command so we might have allocated too much
+            if chunk.buffer? and chunk.buffer.length isnt chunk.size
+              resized = Buffer.allocUnsafe chunk.size
+              chunk.buffer.copy resized, 0, 0, chunk._pos
+              chunk.buffer = resized
+          # finalize the chunk if the camera wrote the entire file before responding
+          if chunk._pos >= chunk.size
+            chunk._complete = true
+            do @finalizeChunk
       when 'put'
         md5sum = crypto
           .createHash 'md5'
