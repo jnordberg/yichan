@@ -6,6 +6,101 @@ net = require 'net'
 stream = require 'stream'
 crypto = require 'crypto'
 
+AMBA_GET_SETTING                =  1 # type = setting name
+                                     # app_status
+AMBA_SET_SETTINGS               =  2 # type = name, param = value
+                                     # restore_factory_settings, param: on
+                                     # buzzer_ring param: on/off
+                                     # dev_reboot param: on
+AMBA_GET_ALL_CURRENT_SETTINGS   =  3
+AMBA_FORMAT_DRIVE               =  4 # param can be disk drive letter, e.g. 'D:'
+AMBA_GET_SPACE                  =  5 # type: total/free
+# UNKNOWN                       =  6 # rval: -13, {'type':'%s','param':'%s','param_size':%d}
+# NOT USED                      =  7
+# UNKNOWN                       =  8 # rval: -13
+AMBA_GET_SINGLE_SETTING_OPTIONS =  9 # param = name
+# UNKNOWN                       = 10 # rval: 0
+AMBA_GET_SYSTEM_INFO            = 11 # json object with firmware versions
+# NOT USED                      = 12
+AMBA_GET_BATTERY_INFO           = 13 # battery level and source
+# UNKNOWN                       = 14 # rval -1 if param and type set
+# UNKNOWN                       = 15 # rval -24 if type set
+# UNKNOWN                       = 16 # rval 0 or -14
+
+AMBA_CREATE_TOKEN   = 0x101
+AMBA_RELEASE_TOKEN  = 0x102
+AMBA_START_PREVIEW  = 0x103
+AMBA_STOP_VF   = 0x104
+
+AMBA_RECORD_VIDEO        = 0x201 # start video recording
+AMBA_STOP_VIDEO_RECORD   = 0x202 # stop recording, errors if not recording
+AMBA_GET_RECORDED_LENGTH = 0x203 # returns number of seconds recording lapsed
+# UNKNOWN                = 0x204 # ? rval 0 if recording error otherwise
+
+AMBA_TAKE_PHOTO   = 0x301 # take photo
+AMBA_STOP_CAPTURE = 0x302 # stop capture
+
+AMBA_GET_THUMB      = 0x401 # param: filename, type: any string?
+                            # > {"msg_id": 1025, "param": "/tmp/fuse_d/DCIM/129MEDIA/YDXJ2007.jpg", "type": "foo"}
+                            # < { rval: 0, msg_id: 1025, size: 1673, type: 'thumb', md5sum: '5f4eb3f0743b2c2cf718a8399828053e' }
+                            # sends data over transfer socket
+AMBA_GET_MEDIA_INFO = 0x402 # param: filename
+                            # > {"msg_id": 1026, "param": "/tmp/fuse_d/DCIM/129MEDIA/YDXJ2007.jpg"}
+                            # < { rval: 0, msg_id: 1026, size: 2711430, date: '2016-06-17 02:28:12', resolution: '4608x2592', media_type: 'img' }
+# UNKNOWN           = 0x403 # param: filename, type: any integer?
+                            # > {"msg_id": 1027, "param": "/tmp/fuse_d/DCIM/129MEDIA/YDXJ2007.jpg", "type": 100}
+                            # < { rval: 0, msg_id: 1027 }
+
+AMBA_DEL_FILE    = 0x501
+AMBA_LS          = 0x502
+AMBA_CD          = 0x503
+AMBA_PWD         = 0x504
+AMBA_GET_FILE    = 0x505
+AMBA_PUT_FILE    = 0x506
+AMBA_CANCEL_FILE = 0x507
+
+AMBA_WIFI_RESTART = 0x601
+
+# 0x701 - accepted but no response sent
+
+# 0x1000001  sdcard type? { rval: 0, msg_id: 16777217, param: 'sd_hc' }
+# 0x1000002  -13
+# 0x1000003  -30 with param, -25 no param
+# 0x1000004  -13
+# 0x1000005  start quick record
+# 0x1000006  -14 with param, -13 no param
+# 0x1000007  -14 with param, -13 no param
+# 0x1000008  another wifi restart?
+# 0x1000009  ? rval 0
+# 0x100000A  ? rval 0
+# 0x100000B  take photo while video is recording - event piv_complete
+# 0x100000C  configure capture mode - param: precise quality cont.;5.0 sec
+# 0x100000D  ?? sent with no
+# 0x100000E  ?? stop mabye?
+# 0X100000F  bind bluetooth devices?
+# 0x1000010  unbind bluetooth devices? - { type: 'btc_delete_all_binded_dev', param: '3' }
+# 0x1000011  -13
+# 0x1000012  ? rval 0
+# 0x1000013  unzip firmware?
+# 0x1000014  last captured photo? - { rval: 0, msg_id: 16777236, param: '/tmp/fuse_d/DCIM/100MEDIA/YDXJ0003.jpg' }
+# 0x1000015  { rval: 0, msg_id: 16777237, param: '7743' }
+# 0x1000016  -14
+# 0x1000017  invalid message id -23
+# 0x1000018  invalid message id -23
+# 0x1000019  -14
+# 0x100001A  dumps firmware log to /DCIM/firmware.log
+#            { rval: 0, msg_id: 16777242, error: '-2' } / { rval: 0, msg_id: 16777242, param: '/DCIM/firmware.log' }
+
+AMBA_BOSS_LINUX_SET_SOFTAP_CONFIG = 0x2000001 # does not work?
+AMBA_BOSS_LINUX_GET_SOFTAP_CONFIG = 0x2000002 # sends invalid JSON
+AMBA_BOSS_LINUX_RESTART_WEB_SERVER = 0x2000006
+
+# something to do with firmware updates
+# 0x4000001 - ?
+# 0x4000002 - ?
+# 0x4000003 - rval 0
+# 0x4000004 - rval 0
+
 shallowCopy = (obj) ->
   rv = {}
   for key of obj
@@ -24,7 +119,7 @@ errorMessages =
   '-14': 'Setting already at requested value'
   '-15': 'Setting not writable'
   '-23': 'Invalid message id'
-  '-26': 'File not found'
+  '-26': 'Invalid path'
 
 resolveErrorMessage = (code) -> errorMessages[String(code)] ? "Unknown code #{ code }"
 
