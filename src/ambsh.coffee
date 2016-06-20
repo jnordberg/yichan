@@ -29,12 +29,14 @@ ambsh = (camera, command, callback) ->
     cmdStream.write "(#{ command }) > d:\\#{ cmdId }\n"
     setImmediate -> cmdStream.end()
 
+  lastList = null
   wait = (callback) ->
     file = null
     isReady = -> file?
     check = (callback) ->
       camera.listDirectory '/tmp/fuse_d', (error, result) ->
         unless error?
+          lastList = result
           file = result.find (f) -> f.name is cmdId
           totalWait += pollInterval
           if not file? and totalWait >= timeout
@@ -55,7 +57,12 @@ ambsh = (camera, command, callback) ->
   cleanup = (callback) ->
     camera.deleteFile "/tmp/fuse_d/#{ cmdId }", callback
 
-  async.series [writeCmd, wait, readResult, cleanup], (error) -> callback error, rv
+  async.series [writeCmd, wait, readResult, cleanup], (error) ->
+    if error? and lastList? and (lastList.find (f) -> f.name is 'commands.ash')?
+      console.log 'WARNING: command not executed properly, removing commands.ash'
+      camera.deleteFile '/tmp/fuse_d/commands.ash', (deleteErr) -> callback error
+    else
+      callback error, rv
 
 
 module.exports = ambsh
