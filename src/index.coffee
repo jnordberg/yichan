@@ -1,10 +1,11 @@
 # Xiaomi Yi Camera control
 
 async = require 'async'
+crypto = require 'crypto'
 events = require 'events'
 net = require 'net'
 stream = require 'stream'
-crypto = require 'crypto'
+util = require 'util'
 
 ambsh = require './ambsh'
 
@@ -109,6 +110,12 @@ shallowCopy = (obj) ->
     rv[key] = obj[key]
   return rv
 
+log = (msgs...) ->
+  out = msgs
+    .map (msg) -> if typeof msg is 'string' then msg else util.inspect msg
+    .join ' '
+  process.stderr.write out + '\n'
+
 Buffer.allocUnsafe ?= (size) -> new Buffer size
 
 errorMessages =
@@ -145,7 +152,7 @@ class YiParser extends stream.Transform
       try
         messages.push JSON.parse data.slice 0, idx + 1
       catch error
-        console.log "WARNING: Got invalid JSON (#{ error.message })."
+        log "WARNING: Got invalid JSON (#{ error.message })."
       data = data.slice idx + 1
 
     # try to parse potentially partial message
@@ -181,7 +188,7 @@ class YiFileReadable extends stream.Readable
           error.message = "File '#{ @filename }' not found."
           @emit 'error', error
           return
-        console.log "WARNING: Error when reading chunk at offset #{ @offset } of #{ @filename }, #{ error.message }"
+        log "WARNING: Error when reading chunk at offset #{ @offset } of #{ @filename }, #{ error.message }"
         if ++@errors > MAX_ERRORS
           @emit 'error', error
         else
@@ -251,7 +258,7 @@ class YiControl extends events.EventEmitter
       do @getToken
 
     @cmdSocket.on 'error', (error) ->
-      console.log "WARNING: Socket error, #{ error.message }"
+      log "WARNING: Socket error, #{ error.message }"
 
     @cmdSocket.on 'close', =>
       if cmd = @activeCmd
@@ -259,7 +266,7 @@ class YiControl extends events.EventEmitter
         clearTimeout cmd.timer
         cmd.callback new Error 'Socket closed'
       if @open
-        console.log "WARNING: Socket closed, trying to reconnect..."
+        log "WARNING: Socket closed, trying to reconnect..."
         setTimeout (=> do @connect), 1000
 
   close: ->
@@ -274,12 +281,12 @@ class YiControl extends events.EventEmitter
     @transferSocket.on 'data', (@handleTransfer.bind this)
     @transferSocket.on 'connect', (@processChunk.bind this)
     @transferSocket.on 'error', (error) ->
-      console.log "WARNING: Transfer socket error, #{ error.message }"
+      log "WARNING: Transfer socket error, #{ error.message }"
     @transferSocket.on 'close', =>
       @transferSocket = null
       do @processChunk
       if @activeChunk?
-        console.log "WARNING: Transfer socket unexpectedly closed"
+        log "WARNING: Transfer socket unexpectedly closed"
         chunk = @activeChunk
         @activeChunk = null
         chunk.callback new Error 'Socket unexpectedly closed'
@@ -290,7 +297,7 @@ class YiControl extends events.EventEmitter
   getToken: ->
     @sendCmd {msg_id: 257, token: 0, heartbeat: 1}, true, (error, result) =>
       if error?
-        console.log "WARNING: Could not create token (#{ error.message })"
+        log "WARNING: Could not create token (#{ error.message })"
       else
         @token = result.param
 
@@ -358,7 +365,7 @@ class YiControl extends events.EventEmitter
             @activeChunk._md5 = data.md5sum ? data.param[1].md5sum
             do @finalizeChunk
           else
-            console.log "WARNING: Got #{ data.type } event with no active chunk!"
+            log "WARNING: Got #{ data.type } event with no active chunk!"
         when 'put_file_fail'
           if @activeChunk?
             @transferError 'Transfer failed.', 'EFAIL'
@@ -374,7 +381,7 @@ class YiControl extends events.EventEmitter
         else
           @emit data.type, data.param
     else
-      console.log 'WARNING: Got unknown message', data
+      log 'WARNING: Got unknown message', data
     do @runQueue
 
   getFileChunk: (filename, offset, size, callback) ->
@@ -491,11 +498,11 @@ class YiControl extends events.EventEmitter
 
   handleTransfer: (data) ->
     unless chunk = @activeChunk
-      console.log 'WARNING: Got transfer data without active chunk!', data.length
+      log 'WARNING: Got transfer data without active chunk!', data.length
       return
 
     if chunk.type is 'put'
-      console.log 'WARNING: Got transfer data when writing chunk!', data.length
+      log 'WARNING: Got transfer data when writing chunk!', data.length
       return
 
     if data.length is chunk.size
