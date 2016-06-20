@@ -27,7 +27,7 @@ ambsh = (camera, command, callback) ->
     cmdStream.on 'error', callback
     cmdStream.on 'finish', callback
     cmdStream.write "(#{ command }) > d:\\#{ cmdId }\n"
-    cmdStream.end()
+    setImmediate -> cmdStream.end()
 
   wait = (callback) ->
     file = null
