@@ -6,7 +6,6 @@
 
   while true; do
     d:\commands.ash
-    rm d:\commands.ash
     sleep 1
   done
 
@@ -26,7 +25,11 @@ ambsh = (camera, command, callback) ->
     cmdStream = camera.createWriteStream '/tmp/fuse_d/commands.ash'
     cmdStream.on 'error', callback
     cmdStream.on 'finish', callback
-    cmdStream.write "(#{ command }) > d:\\#{ cmdId }\n"
+    cmd = """
+      rm d:\\commands.ash
+      (#{ command }) > d:\\#{ cmdId }
+    """
+    cmdStream.write cmd + '\n'
     setImmediate -> cmdStream.end()
 
   lastList = null
