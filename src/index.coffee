@@ -274,17 +274,17 @@ class YiControl extends events.EventEmitter
     @cmdSocket?.destroy()
     @transferSocket?.destroy()
     @cmdSocket = null
-    @transferSocket = null
 
   setupTransfer: ->
     @transferSocket = new net.Socket
-    @transferSocket.on 'data', (@handleTransfer.bind this)
+    @transferSocket.on 'data', @handleTransfer
     @transferSocket.on 'connect', (@processChunk.bind this)
     @transferSocket.on 'error', (error) ->
       log "WARNING: Transfer socket error, #{ error.message }"
     @transferSocket.on 'close', =>
+      log "WARNING: Transfer socket closed" if @open
+      @transferSocket.removeListener 'data', @handleTransfer
       @transferSocket = null
-      do @processChunk
       if @activeChunk?
         log "WARNING: Transfer socket unexpectedly closed"
         chunk = @activeChunk
@@ -422,8 +422,8 @@ class YiControl extends events.EventEmitter
   transferError: (message='Timed out waiting for transfer socket.', code='ETIMEOUT') =>
     chunk = @activeChunk
     @activeChunk = null
-    @transferSocket.destroy()
-    @transferSocket = null
+    @transferSocket?.removeListener 'data', @handleTransfer
+    @transferSocket?.end()
     error = new Error message
     error.code = code
     chunk.callback error
@@ -434,6 +434,10 @@ class YiControl extends events.EventEmitter
 
     unless @transferSocket?
       do @setupTransfer
+      return
+
+    unless @transferSocket.readyState is 'open'
+      log "WARNING: Transfer socket not open"
       return
 
     chunk = @activeChunk = @chunkQueue.shift()
@@ -491,12 +495,12 @@ class YiControl extends events.EventEmitter
       #   .update chunk.buffer
       #   .digest 'hex'
       @activeChunk = null
-      @transferSocket.setTimeout 0
-      @transferSocket.removeListener 'timeout', @transferError
+      @transferSocket?.setTimeout 0
+      @transferSocket?.removeListener 'timeout', @transferError
       chunk.callback null, chunk.buffer, chunk._totalSize
       do @processChunk
 
-  handleTransfer: (data) ->
+  handleTransfer: (data) =>
     unless chunk = @activeChunk
       log 'WARNING: Got transfer data without active chunk!', data.length
       return
