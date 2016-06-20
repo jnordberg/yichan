@@ -516,8 +516,11 @@ class YiControl extends events.EventEmitter
       chunk._complete = true
       do @finalizeChunk
 
+  getSetting: (name, callback) ->
+    @sendCmd {msg_id: AMBA_GET_SETTING, type: name}, callback
+
   getSettings: (callback) ->
-    @sendCmd {msg_id: 3}, (error, result) ->
+    @sendCmd {msg_id: AMBA_GET_ALL_CURRENT_SETTINGS}, (error, result) ->
       unless error?
         rv = {}
         for item in result.param
@@ -525,11 +528,14 @@ class YiControl extends events.EventEmitter
             rv[key] = value
       callback error, rv
 
+  writeSetting: (name, value, callback) ->
+    @sendCmd {msg_id: AMBA_SET_SETTINGS, type: name, param: value}, callback
+
   writeSettings: (settings, callback) ->
     cmds = []
     for key, value of settings
       cmds.push
-        msg_id: 2
+        msg_id: AMBA_SET_SETTINGS
         type: key
         param: value
     writeSetting = (cmd, callback) =>
