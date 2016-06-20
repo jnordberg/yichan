@@ -217,8 +217,8 @@ class YiControl extends events.EventEmitter
     cameraHost: '192.168.42.1'
     cmdPort: 7878
     transferPort: 8787
-    cmdTimeout: 5000
-    transferTimeout: 5000
+    cmdTimeout: 10000
+    transferTimeout: 10000
 
   constructor: (@options={}) ->
     @options[key] ?= defaults[key] for key of defaults
