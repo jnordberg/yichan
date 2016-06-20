@@ -5,8 +5,11 @@
   For this to work you need to have an autoexec.ash file in the root of your sdcard containing this code:
 
   while true; do
-    d:\commands.ash
-    rm d:\commands.ash
+    if mv d:\commands.lock d:\commands.locked; then
+      d:\commands.ash
+      rm d:\commands.ash
+      rm d:\commands.locked
+    fi
     sleep 1
   done
 
