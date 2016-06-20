@@ -429,17 +429,12 @@ class YiControl extends events.EventEmitter
       do @setupTransfer
       return
 
-    @transferSocket.setTimeout @options.transferTimeout
-    @transferSocket.once 'timeout', @transferError
-
     chunk = @activeChunk = @chunkQueue.shift()
     chunk._pos = 0
 
     handleError = (error) =>
       chunk.callback error
       @activeChunk = null
-      @transferSocket?.setTimeout 0
-      @transferSocket?.removeListener 'timeout', @transferError
 
     switch chunk.type
       when 'get'
@@ -447,6 +442,8 @@ class YiControl extends events.EventEmitter
           if error?
             handleError error
             return
+          @transferSocket.setTimeout @options.transferTimeout
+          @transferSocket.once 'timeout', @transferError
           chunk._totalSize = result.size
           if result.rem_size isnt chunk.size
             chunk.size = result.rem_size
@@ -470,6 +467,8 @@ class YiControl extends events.EventEmitter
           if error?
             handleError error
             return
+          @transferSocket.setTimeout @options.transferTimeout
+          @transferSocket.once 'timeout', @transferError
           @transferSocket.write chunk.buffer, =>
             chunk._complete = true
             do @processChunk
