@@ -5,7 +5,11 @@
   Requires you to have the following code appended to your autoexec.ash:
 
   while true; do
-    d:\commands.ash
+    if mv d:\commands.lock d:\commands.locked; then
+      d:\commands.ash
+      rm d:\commands.ash
+      rm d:\commands.locked
+    fi
     sleep 1
   done
 
@@ -21,16 +25,33 @@ ambsh = (camera, command, callback) ->
   pollInterval = 500
   totalWait = 0
 
-  writeCmd = (callback) ->
-    cmdStream = camera.createWriteStream '/tmp/fuse_d/commands.ash'
-    cmdStream.on 'error', callback
-    cmdStream.on 'finish', callback
+  scriptFile = "#{ cmdId }.ash"
+  responseFile = "#{ cmdId }.txt"
+
+  writeScript = (callback) ->
+    script = camera.createWriteStream "/tmp/fuse_d/#{ scriptFile }"
+    script.on 'error', callback
+    script.on 'finish', callback
+    script.write command + '\n'
+    setImmediate -> do script.end
+
+  writeCommands = (callback) ->
+    commands = camera.createWriteStream '/tmp/fuse_d/commands.ash'
+    commands.on 'error', callback
+    commands.on 'finish', callback
     cmd = """
+      d:\\#{ scriptFile } > d:\\#{ responseFile }
       rm d:\\commands.ash
-      (#{ command }) > d:\\#{ cmdId }
     """
-    cmdStream.write cmd + '\n'
-    setImmediate -> cmdStream.end()
+    commands.write cmd + '\n'
+    setImmediate -> do commands.end
+
+  writeLock = (callback) ->
+    file = camera.createWriteStream '/tmp/fuse_d/commands.lock'
+    file.on 'error', callback
+    file.on 'finish', callback
+    file.write cmdId + '\n'
+    setImmediate -> do file.end
 
   lastList = null
   wait = (callback) ->
@@ -40,7 +61,7 @@ ambsh = (camera, command, callback) ->
       camera.listDirectory '/tmp/fuse_d', (error, result) ->
         unless error?
           lastList = result
-          file = result.find (f) -> f.name is cmdId
+          file = result.find (f) -> f.name is responseFile
           totalWait += pollInterval
           if not file? and totalWait >= timeout
             error = new Error 'Command timed out, make sure you have the polling loop in your autoexec.ash.'
@@ -50,7 +71,7 @@ ambsh = (camera, command, callback) ->
 
   readResult = (callback) ->
     data = []
-    resultStream = camera.createReadStream "/tmp/fuse_d/#{ cmdId }"
+    resultStream = camera.createReadStream "/tmp/fuse_d/#{ responseFile }"
     resultStream.on 'error', callback
     resultStream.on 'data', (chunk) -> data.push chunk
     resultStream.on 'end', ->
@@ -58,11 +79,12 @@ ambsh = (camera, command, callback) ->
       do callback
 
   cleanup = (callback) ->
-    camera.deleteFile "/tmp/fuse_d/#{ cmdId }", callback
+    deleteFile = (file, callback) -> camera.deleteFile "/tmp/fuse_d/#{ file }", callback
+    async.mapSeries [scriptFile, responseFile], deleteFile, callback
 
-  async.series [writeCmd, wait, readResult, cleanup], (error) ->
+  async.series [writeScript, writeCommands, writeLock, wait, readResult, cleanup], (error) ->
     if error? and lastList? and (lastList.find (f) -> f.name is 'commands.ash')?
-      console.log 'WARNING: command not executed properly, removing commands.ash'
+      process.stderr.write 'WARNING: command not executed properly, removing commands.ash\n'
       camera.deleteFile '/tmp/fuse_d/commands.ash', (deleteErr) -> callback error
     else
       callback error, rv
