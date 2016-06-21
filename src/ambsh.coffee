@@ -39,10 +39,7 @@ ambsh = (camera, command, callback) ->
     commands = camera.createWriteStream '/tmp/fuse_d/commands.ash'
     commands.on 'error', callback
     commands.on 'finish', callback
-    cmd = """
-      d:\\#{ scriptFile } > d:\\#{ responseFile }
-      rm d:\\commands.ash
-    """
+    cmd = "d:\\#{ scriptFile } > d:\\#{ responseFile }"
     commands.write cmd + '\n'
     setImmediate -> do commands.end
 
