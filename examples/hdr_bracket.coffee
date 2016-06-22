@@ -4,11 +4,12 @@
 
   For this to work you need to have an autoexec.ash file in the root of your sdcard containing this code:
 
+  mkdir d:\commands
   while true; do
-    if mv d:\commands.lock d:\commands.locked; then
-      d:\commands.ash
-      rm d:\commands.ash
-      rm d:\commands.locked
+    if (mv d:\commands\lock d:\commands\locked) > d:\.null; then
+      rm d:\commands\locked > d:\.null
+      d:\commands\exec.ash > d:\.null
+      rm d:\commands\exec.ash > d:\.null
     fi
     sleep 1
   done

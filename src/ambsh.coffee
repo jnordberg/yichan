@@ -4,11 +4,12 @@
 
   Requires you to have the following code appended to your autoexec.ash:
 
+  mkdir d:\commands
   while true; do
-    if mv d:\commands.lock d:\commands.locked; then
-      d:\commands.ash
-      rm d:\commands.ash
-      rm d:\commands.locked
+    if (mv d:\commands\lock d:\commands\locked) > d:\.null; then
+      rm d:\commands\locked > d:\.null
+      d:\commands\exec.ash > d:\.null
+      rm d:\commands\exec.ash > d:\.null
     fi
     sleep 1
   done
@@ -16,49 +17,52 @@
 ###
 
 async = require 'async'
-uuid = require 'node-uuid'
 
 ambsh = (camera, command, callback) ->
   rv = null
-  cmdId = uuid.v4()
   timeout = camera.options.cmdTimeout
   pollInterval = 500
   totalWait = 0
 
-  scriptFile = "#{ cmdId }.ash"
-  responseFile = "#{ cmdId }.txt"
+  removeOld = (callback) ->
+    camera.listDirectory '/tmp/fuse_d/commands', (error, result) ->
+      if not error? and (result.find (file) -> file.name is 'yichan.ash')?
+        camera.deleteFile '/tmp/fuse_d/commands/yichan.ash', callback
+      else
+        callback error
 
   writeScript = (callback) ->
-    script = camera.createWriteStream "/tmp/fuse_d/#{ scriptFile }"
-    script.on 'error', callback
-    script.on 'finish', callback
-    script.write command + '\n'
-    setImmediate -> do script.end
-
-  writeCommands = (callback) ->
-    commands = camera.createWriteStream '/tmp/fuse_d/commands.ash'
-    commands.on 'error', callback
-    commands.on 'finish', callback
-    cmd = "d:\\#{ scriptFile } > d:\\#{ responseFile }"
-    commands.write cmd + '\n'
-    setImmediate -> do commands.end
-
-  writeLock = (callback) ->
-    file = camera.createWriteStream '/tmp/fuse_d/commands.lock'
+    file = camera.createWriteStream '/tmp/fuse_d/commands/yichan.ash'
     file.on 'error', callback
     file.on 'finish', callback
-    file.write cmdId + '\n'
+    file.write command + '\n'
     setImmediate -> do file.end
 
-  lastList = null
+  writeCommands = (callback) ->
+    file = camera.createWriteStream '/tmp/fuse_d/commands/exec.ash'
+    file.on 'error', callback
+    file.on 'finish', callback
+    cmd = """
+      d:\\commands\\yichan.ash > d:\\commands\\yichan.txt
+      rm d:\\commands\\yichan.ash
+    """
+    file.write cmd + '\n'
+    setImmediate -> do file.end
+
+  writeLock = (callback) ->
+    file = camera.createWriteStream '/tmp/fuse_d/commands/lock'
+    file.on 'error', callback
+    file.on 'finish', callback
+    file.write 'yichan\n'
+    setImmediate -> do file.end
+
   wait = (callback) ->
-    file = null
-    isReady = -> file?
+    files = []
+    isReady = -> ('yichan.txt' in files) and ('yichan.ash' not in files)
     check = (callback) ->
-      camera.listDirectory '/tmp/fuse_d', (error, result) ->
+      camera.listDirectory '/tmp/fuse_d/commands', (error, result) ->
         unless error?
-          lastList = result
-          file = result.find (f) -> f.name is responseFile
+          files = result.map (file) -> file.name
           totalWait += pollInterval
           if not file? and totalWait >= timeout
             error = new Error 'Command timed out, make sure you have the polling loop in your autoexec.ash.'
@@ -68,23 +72,15 @@ ambsh = (camera, command, callback) ->
 
   readResult = (callback) ->
     data = []
-    resultStream = camera.createReadStream "/tmp/fuse_d/#{ responseFile }"
+    resultStream = camera.createReadStream '/tmp/fuse_d/commands/yichan.txt'
     resultStream.on 'error', callback
     resultStream.on 'data', (chunk) -> data.push chunk
     resultStream.on 'end', ->
       rv = (Buffer.concat data).toString()
       do callback
 
-  cleanup = (callback) ->
-    deleteFile = (file, callback) -> camera.deleteFile "/tmp/fuse_d/#{ file }", callback
-    async.mapSeries [scriptFile, responseFile], deleteFile, callback
-
-  async.series [writeScript, writeCommands, writeLock, wait, readResult, cleanup], (error) ->
-    if error? and lastList? and (lastList.find (f) -> f.name is 'commands.ash')?
-      process.stderr.write 'WARNING: command not executed properly, removing commands.ash\n'
-      camera.deleteFile '/tmp/fuse_d/commands.ash', (deleteErr) -> callback error
-    else
-      callback error, rv
+  async.series [removeOld, writeScript, writeCommands, writeLock, wait, readResult], (error) ->
+    callback error, rv
 
 
 module.exports = ambsh
