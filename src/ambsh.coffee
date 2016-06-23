@@ -64,7 +64,7 @@ ambsh = (camera, command, callback) ->
         unless error?
           files = result.map (file) -> file.name
           totalWait += pollInterval
-          if not file? and totalWait >= timeout
+          if totalWait >= timeout and not isReady()
             error = new Error 'Command timed out, make sure you have the polling loop in your autoexec.ash.'
         callback error
     delayedCheck = (callback) -> setTimeout (-> check callback), pollInterval
