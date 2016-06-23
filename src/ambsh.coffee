@@ -17,6 +17,7 @@
 ###
 
 async = require 'async'
+uuid = require 'node-uuid'
 
 ambsh = (camera, command, callback) ->
   rv = null
@@ -24,27 +25,33 @@ ambsh = (camera, command, callback) ->
   pollInterval = 500
   totalWait = 0
 
+  cmdId = uuid.v4().replace /-/g, ''
+  scriptFile = "yichan_#{ cmdId }.ash"
+  responseFile = "yichan_#{ cmdId }.txt"
+
   removeOld = (callback) ->
+    deleteFile = (file, callback) ->
+      camera.deleteFile "/tmp/fuse_d/commands/#{ file.name }", callback
     camera.listDirectory '/tmp/fuse_d/commands', (error, result) ->
-      if not error? and (result.find (file) -> file.name is 'yichan.ash')?
-        camera.deleteFile '/tmp/fuse_d/commands/yichan.ash', callback
+      unless error?
+        files = result.filter (file) -> file.name.match /^yichan/
+        async.forEachSeries files, deleteFile, callback
       else
         callback error
 
-  writeScript = (callback) ->
-    file = camera.createWriteStream '/tmp/fuse_d/commands/yichan.ash'
+  writeCommands = (callback) ->
+    file = camera.createWriteStream "/tmp/fuse_d/commands/#{ scriptFile }"
     file.on 'error', callback
     file.on 'finish', callback
     file.write command + '\n'
     setImmediate -> do file.end
 
-  writeCommands = (callback) ->
+  writeExec = (callback) ->
     file = camera.createWriteStream '/tmp/fuse_d/commands/exec.ash'
     file.on 'error', callback
     file.on 'finish', callback
     cmd = """
-      d:\\commands\\yichan.ash > d:\\commands\\yichan.txt
-      rm d:\\commands\\yichan.ash
+      d:\\commands\\#{ scriptFile } > d:\\commands\\#{ responseFile }
     """
     file.write cmd + '\n'
     setImmediate -> do file.end
@@ -53,12 +60,12 @@ ambsh = (camera, command, callback) ->
     file = camera.createWriteStream '/tmp/fuse_d/commands/lock'
     file.on 'error', callback
     file.on 'finish', callback
-    file.write 'yichan\n'
+    file.write "yichan_#{ cmdId }"
     setImmediate -> do file.end
 
   wait = (callback) ->
     files = []
-    isReady = -> ('yichan.txt' in files) and ('yichan.ash' not in files)
+    isReady = -> (responseFile in files)
     check = (callback) ->
       camera.listDirectory '/tmp/fuse_d/commands', (error, result) ->
         unless error?
@@ -72,14 +79,14 @@ ambsh = (camera, command, callback) ->
 
   readResult = (callback) ->
     data = []
-    resultStream = camera.createReadStream '/tmp/fuse_d/commands/yichan.txt'
+    resultStream = camera.createReadStream "/tmp/fuse_d/commands/#{ responseFile }"
     resultStream.on 'error', callback
     resultStream.on 'data', (chunk) -> data.push chunk
     resultStream.on 'end', ->
       rv = (Buffer.concat data).toString()
       do callback
 
-  async.series [removeOld, writeScript, writeCommands, writeLock, wait, readResult], (error) ->
+  async.series [removeOld, writeCommands, writeExec, writeLock, wait, readResult], (error) ->
     callback error, rv
 
 

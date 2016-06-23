@@ -10,7 +10,8 @@
     "url": "https://github.com/jnordberg/yichan.git"
   },
   "dependencies": {
-    "async": "^2.0.0-rc.5"
+    "async": "^2.0.0-rc.5",
+    "node-uuid": "^1.4.7"
   },
   "scripts": {
     "prepublish": "coffee -c -b -o lib src"
